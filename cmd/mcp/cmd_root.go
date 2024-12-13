@@ -31,10 +31,6 @@ var (
 	cmdRoot = &cobra.Command{
 		Use:   "mcp",
 		Short: "MCP is a cli tool for managing all of your model context needs via the Model Context Protocol.",
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		},
-		Run: func(cmd *cobra.Command, args []string) {
-		},
 	}
 )
 
@@ -43,6 +39,7 @@ func init() {
 
 	cmdRoot.PersistentFlags().StringVar(&logLevelArg, "log-level", "info", "log level among \"debug\", \"info\" or \"error\"")
 
+	cmdRoot.AddCommand(cmdRegistry)
 	cmdRoot.AddCommand(cmdServe)
 }
 
@@ -104,10 +101,12 @@ func initConfig() {
 	}
 	defer migrations.Close()
 
-	if err := migrations.Up(); err != nil && err != migrate.ErrNoChange {
+	err = migrations.Up()
+	if err != nil && err != migrate.ErrNoChange {
 		logger.Error("error running migrations", "err", err, "uri", dsnURI)
 		os.Exit(1)
 	}
-
-	logger.Debug("migrations completed successfully", "uri", dsnURI)
+	if err != migrate.ErrNoChange {
+		logger.Debug("migrations completed successfully", "uri", dsnURI)
+	}
 }
