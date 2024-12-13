@@ -23,11 +23,11 @@ Install `mcp run <protocol>` as an MCP Server for the supplied Client.
 
 Search the public MCP server Registry for servers matching the query. A rich description will be shown for matching servers.
 
-## mcp server install <server[@<version>]>
+## mcp package install <package[@<version>]>
 
-Install an MCP server from the public server Registry. This will start a flow that captures any required configuration for the MCP Server, persist it locally and then start it.
+Install an MCP Server from the public package Registry. This will start a flow that captures any required configuration for the MCP package, persist it locally and then start it.
 
-## mcp server uninstall <server>
+## mcp package uninstall <package>
 
 Uninstall an MCP Server that was previously installed. Running clients will be notified such that they reload resources, tools, etc.
 

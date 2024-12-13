@@ -1,16 +1,18 @@
 package registry
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 
-	"github.com/blevesearch/bleve"
-	"github.com/blevesearch/bleve/document"
-	"github.com/blevesearch/bleve/mapping"
+	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/lang/en"
+	"github.com/blevesearch/bleve/v2/document"
+	"github.com/blevesearch/bleve/v2/mapping"
+	index "github.com/blevesearch/bleve_index_api"
+
 	"github.com/google/uuid"
 )
 
@@ -29,12 +31,24 @@ func NewFakeClient(logger *slog.Logger) (*fakeClient, error) {
 	}
 
 	mapping := bleve.NewIndexMapping()
-	index, err := bleve.NewMemOnly(mapping)
+	mapping.DefaultAnalyzer = en.AnalyzerName
+
+	pkgMapping := bleve.NewDocumentMapping()
+	nameFieldMapping := bleve.NewTextFieldMapping()
+	nameFieldMapping.Analyzer = "en"
+	pkgMapping.AddFieldMappingsAt("Name", nameFieldMapping)
+	descFieldMapping := bleve.NewTextFieldMapping()
+	descFieldMapping.Analyzer = "en"
+	pkgMapping.AddFieldMappingsAt("Description", descFieldMapping)
+	mapping.AddDocumentMapping("package", pkgMapping)
+	mapping.DefaultMapping = pkgMapping
+
+	bIndex, err := bleve.NewMemOnly(mapping)
 	if err != nil {
 		return nil, err
 	}
 
-	c.index = index
+	c.index = bIndex
 	c.mapping = mapping
 
 	pkgs, err := loadFakePackages()
@@ -42,7 +56,7 @@ func NewFakeClient(logger *slog.Logger) (*fakeClient, error) {
 		return nil, err
 	}
 
-	batch := index.NewBatch()
+	batch := bIndex.NewBatch()
 
 	for _, p := range pkgs {
 		id, err := uuid.NewRandom()
@@ -58,18 +72,22 @@ func NewFakeClient(logger *slog.Logger) (*fakeClient, error) {
 		}
 
 		doc := document.NewDocument(id.String())
+
 		if err := mapping.MapDocument(doc, m); err != nil {
 			return nil, err
 		}
 
-		var mess bytes.Buffer
+		mess, err := json.Marshal(m)
+		if err != nil {
+			return nil, fmt.Errorf("error marshalling document %s: %w", id.String(), err)
+		}
 
-		enc := gob.NewEncoder(&mess)
-		enc.Encode(m)
+		nameField := document.NewTextField("Name", nil, []byte(p.Name))
+		descField := document.NewTextField("Description", nil, []byte(p.Name))
+		sourceField := document.NewTextFieldWithIndexingOptions(
+			"_source", nil, mess, index.StoreField)
 
-		field := document.NewTextFieldWithIndexingOptions(
-			"_source", nil, mess.Bytes(), document.StoreField)
-		nd := doc.AddField(field)
+		nd := doc.AddField(nameField).AddField(descField).AddField(sourceField)
 
 		if err := batch.IndexAdvanced(nd); err != nil {
 			return nil, err
@@ -83,7 +101,7 @@ func NewFakeClient(logger *slog.Logger) (*fakeClient, error) {
 		})
 	}
 
-	if err := index.Batch(batch); err != nil {
+	if err := bIndex.Batch(batch); err != nil {
 		return nil, err
 	}
 
@@ -97,7 +115,7 @@ func (c *fakeClient) GetIntegrationManifestByNameAndVersion(name, version string
 func (c *fakeClient) SearchIntegrations(ctx context.Context, terms ...string) ([]*IntegrationSearchResult, error) {
 	q := bleve.NewQueryStringQuery(strings.Join(terms, " "))
 	sr := bleve.NewSearchRequest(q)
-	sr.Fields = []string{"_source"}
+	sr.Fields = []string{"_source", "Name", "Description"}
 
 	results, err := c.index.Search(sr)
 	if err != nil {
@@ -112,13 +130,14 @@ func (c *fakeClient) SearchIntegrations(ctx context.Context, terms ...string) ([
 			return nil, fmt.Errorf("no _source field found for document %s", hit.ID)
 		}
 
-		messout := bytes.NewBuffer([]byte(fmt.Sprintf("%v", b)))
-		dec := gob.NewDecoder(messout)
+		bstr, ok := b.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string, got %T", b)
+		}
 
 		var sr IntegrationSearchResult
-		err = dec.Decode(&sr)
-		if err != nil {
-			return nil, fmt.Errorf("error decoding document %s: %w", hit.ID, err)
+		if err := json.Unmarshal([]byte(bstr), &sr); err != nil {
+			return nil, fmt.Errorf("error unmarshalling document %s: %w", hit.ID, err)
 		}
 
 		pkgs = append(pkgs, &sr)

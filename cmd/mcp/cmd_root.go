@@ -19,6 +19,7 @@ import (
 var dbDir embed.FS
 
 var (
+	db     *sql.DB
 	dsnURI string
 
 	logLevelArg string
@@ -39,6 +40,7 @@ func init() {
 
 	cmdRoot.PersistentFlags().StringVar(&logLevelArg, "log-level", "info", "log level among \"debug\", \"info\" or \"error\"")
 
+	cmdRoot.AddCommand(cmdPackage)
 	cmdRoot.AddCommand(cmdRegistry)
 	cmdRoot.AddCommand(cmdServe)
 }
@@ -80,18 +82,18 @@ func initConfig() {
 
 	dsnURI = viper.GetString("db")
 
-	db, err := sql.Open("sqlite", dsnURI)
+	localDb, err := sql.Open("sqlite", dsnURI)
 	if err != nil {
 		logger.Error("error connecting to database", "err", err, "uri", dsnURI)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer localDb.Close()
 
 	dir, err := iofs.New(dbDir, "db")
 	cobra.CheckErr(err)
 	defer dir.Close()
 
-	instance, err := sqlite.WithInstance(db, &sqlite.Config{})
+	instance, err := sqlite.WithInstance(localDb, &sqlite.Config{})
 	cobra.CheckErr(err)
 
 	migrations, err := migrate.NewWithInstance("iofs", dir, "sqlite:/"+dsnURI, instance)
@@ -109,4 +111,6 @@ func initConfig() {
 	if err != migrate.ErrNoChange {
 		logger.Debug("migrations completed successfully", "uri", dsnURI)
 	}
+
+	db = localDb
 }
