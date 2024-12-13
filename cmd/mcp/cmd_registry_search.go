@@ -13,7 +13,8 @@ var (
 		Aliases: []string{"s"},
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			rc := &registry.FakeClient{}
+			rc, err := registry.NewFakeClient(logger)
+			cobra.CheckErr(err)
 
 			pkgs, err := rc.SearchIntegrations(ctx, args...)
 			cobra.CheckErr(err)
@@ -21,7 +22,9 @@ var (
 			cmd.PrintErrf("Found %d packages\n", len(pkgs))
 
 			for _, pkg := range pkgs {
+				cmd.PrintErrf("\n")
 				cmd.PrintErrf("%s %s\n", pkg.Name, pkg.Version)
+				cmd.PrintErrf("  %s\n", pkg.Description)
 			}
 		},
 	}
