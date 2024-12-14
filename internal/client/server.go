@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"mcp/internal/mcp"
+	serverrunner "mcp/internal/server_runner"
 	"os"
 	"os/exec"
 
@@ -23,6 +24,8 @@ type MCPServerDefinition struct {
 type Client struct {
 	Id     string
 	Server *MCPServerDefinition
+
+	runner serverrunner.ServerRunner
 
 	cmd    *exec.Cmd
 	conn   *jsonrpc2.Conn

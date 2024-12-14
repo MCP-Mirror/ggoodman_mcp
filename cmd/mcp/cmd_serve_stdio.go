@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	localbroker "mcp/internal/local_broker"
+	docker_runner "mcp/internal/server_runner/docker"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +19,11 @@ var (
 		Use:   "stdio",
 		Short: "Start mcp as a stdio server.",
 		Run: func(cmd *cobra.Command, args []string) {
+			ctx := cmd.Context()
+
+			runner, err := docker_runner.NewDockerServerRunner(ctx)
+			cobra.CheckErr(err)
+
 			g, ctx := errgroup.WithContext(context.Background())
 
 			g.Go(func() error {
@@ -27,7 +33,7 @@ var (
 			})
 
 			g.Go(func() error {
-				_, err := localbroker.NewServer(ctx, logger, os.Stdin, os.Stdout)
+				_, err := localbroker.NewServer(ctx, logger, runner, os.Stdin, os.Stdout)
 				if err != nil {
 					return err
 				}

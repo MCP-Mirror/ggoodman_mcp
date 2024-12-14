@@ -1,4 +1,4 @@
-package local_broker
+package localbroker
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"mcp/internal/client"
 	"mcp/internal/mcp"
+	serverrunner "mcp/internal/server_runner"
 	"strings"
 	"sync"
 
@@ -29,7 +30,7 @@ var servers []client.MCPServerDefinition = []client.MCPServerDefinition{
 	},
 }
 
-func NewServer(ctx context.Context, logger *slog.Logger, r io.ReadCloser, w io.WriteCloser) (io.Closer, error) {
+func NewServer(ctx context.Context, logger *slog.Logger, runner serverrunner.ServerRunner, r io.ReadCloser, w io.WriteCloser) (io.Closer, error) {
 	server := &server{
 		logger:  logger,
 		clients: make(map[string]*client.Client),
@@ -187,7 +188,7 @@ func (s *server) handleInitializedNotification(_ context.Context, _ *jsonrpc2.Co
 	return nil
 }
 
-func (s *server) handleToolsCallRequest(ctx context.Context, _ *jsonrpc2.Conn, req *mcp.ToolsCallRequest) (*mcp.ToolsCallResult, error) {
+func (s *server) handleToolsCallRequest(_ context.Context, _ *jsonrpc2.Conn, req *mcp.ToolsCallRequest) (*mcp.ToolsCallResult, error) {
 	switch req.ToolName {
 	case "__mcp__install_server":
 		return nil, &jsonrpc2.Error{
