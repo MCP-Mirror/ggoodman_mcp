@@ -52,7 +52,20 @@ type InitializeResult struct {
 	Instructions    *string            `json:"instructions,omitempty"`
 }
 
-type InitializeNotification struct{}
+type InitializedNotification struct{}
+
+type Meta map[string]any
+
+type ToolsCallRequest struct {
+	ToolName  string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+type ToolsCallResult struct {
+	Meta    Meta  `json:"_meta,omitempty"`
+	Content []any `json:"content"`
+	IsError bool  `json:"isError"`
+}
 
 type ToolDefinition struct {
 	Name        string           `json:"name"`
@@ -66,42 +79,28 @@ type JSONSchemaObject struct {
 	RequiredProperties []string       `json:"required"`
 }
 
+type JSONSchemaUnknown any
+
 type ToolsListRequest struct{}
 
 type ToolsListResult struct {
 	Tools []ToolDefinition `json:"tools"`
 }
 
-func MustParams(req *jsonrpc2.Request) error {
+func MustParams[T any](req *jsonrpc2.Request) (*T, error) {
 	if req.Params == nil {
-		return &jsonrpc2.Error{
+		return nil, &jsonrpc2.Error{
 			Code:    jsonrpc2.CodeInvalidParams,
 			Message: "missing params",
 		}
 	}
-	return nil
-}
 
-func MustInitializeRequest(req *jsonrpc2.Request) (*InitializeRequest, error) {
-	if err := MustParams(req); err != nil {
-		return nil, err
-	}
-
-	var r InitializeRequest
+	var r T
 	if err := json.Unmarshal(*req.Params, &r); err != nil {
-		return nil, err
-	}
-	return &r, nil
-}
-
-func MustInitializedNotification(req *jsonrpc2.Request) (*InitializeNotification, error) {
-	if err := MustParams(req); err != nil {
-		return nil, err
-	}
-
-	var r InitializeNotification
-	if err := json.Unmarshal(*req.Params, &r); err != nil {
-		return nil, err
+		return nil, &jsonrpc2.Error{
+			Code:    jsonrpc2.CodeInvalidParams,
+			Message: err.Error(),
+		}
 	}
 	return &r, nil
 }

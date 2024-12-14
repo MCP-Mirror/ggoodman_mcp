@@ -1,33 +1,21 @@
 package main
 
 import (
-	"database/sql"
-	"embed"
 	"log/slog"
 	"os"
 	"path"
 
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/sqlite"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
+	slogmulti "github.com/samber/slog-multi"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	_ "modernc.org/sqlite"
 )
 
-//go:embed db/*.sql
-var dbDir embed.FS
-
 var (
-	db     *sql.DB
-	dsnURI string
+	logger *slog.Logger
 
 	logLevelArg string
 	logLevel    = &slog.LevelVar{}
-	logger      = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level:     logLevel,
-		AddSource: false,
-	}))
 
 	cmdRoot = &cobra.Command{
 		Use:   "mcp",
@@ -68,6 +56,7 @@ func initConfig() {
 	viper.SetConfigType("toml")
 	viper.SetConfigName("config.toml")
 
+	viper.SetDefault("logfile", path.Join(cfgDir, "debug.log"))
 	viper.SetDefault("db", path.Join(cfgDir, "mcp.db"))
 
 	viper.AutomaticEnv()
@@ -80,37 +69,13 @@ func initConfig() {
 		}
 	}
 
-	dsnURI = viper.GetString("db")
-
-	localDb, err := sql.Open("sqlite", dsnURI)
-	if err != nil {
-		logger.Error("error connecting to database", "err", err, "uri", dsnURI)
-		os.Exit(1)
-	}
-	defer localDb.Close()
-
-	dir, err := iofs.New(dbDir, "db")
-	cobra.CheckErr(err)
-	defer dir.Close()
-
-	instance, err := sqlite.WithInstance(localDb, &sqlite.Config{})
+	logFile := viper.GetString("logfile")
+	logFd, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
 	cobra.CheckErr(err)
 
-	migrations, err := migrate.NewWithInstance("iofs", dir, "sqlite:/"+dsnURI, instance)
-	if err != nil {
-		logger.Error("error creating migrations", "err", err, "uri", dsnURI)
-		os.Exit(1)
-	}
-	defer migrations.Close()
-
-	err = migrations.Up()
-	if err != nil && err != migrate.ErrNoChange {
-		logger.Error("error running migrations", "err", err, "uri", dsnURI)
-		os.Exit(1)
-	}
-	if err != migrate.ErrNoChange {
-		logger.Debug("migrations completed successfully", "uri", dsnURI)
-	}
-
-	db = localDb
+	logger = slog.New(slogmulti.Fanout(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	}), slog.NewTextHandler(logFd, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
 }

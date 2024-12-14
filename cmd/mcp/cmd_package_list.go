@@ -4,6 +4,7 @@ import (
 	"mcp/internal/integrations/sql"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -12,7 +13,8 @@ var (
 		Short:   "List installed packages.",
 		Aliases: []string{"ls"},
 		Run: func(cmd *cobra.Command, args []string) {
-			repo, err := sql.NewSQLDatabaseIntegrationsRepository(db)
+			dsnURI := viper.GetString("db")
+			repo, err := sql.NewSQLDatabaseIntegrationsRepository(cmd.Context(), logger, dsnURI)
 			cobra.CheckErr(err)
 
 			intalled, err := repo.ListIntegrations(cmd.Context())

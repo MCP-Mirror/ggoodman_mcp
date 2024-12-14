@@ -14,6 +14,11 @@ type IntegrationManifest struct {
 	Name        string
 	Version     string
 	Description string
+	Vendor      string
+	SourceURL   string
+	License     string
+	Homepage    string
+	Runtime     string
 }
 
 type RegistryClient interface {

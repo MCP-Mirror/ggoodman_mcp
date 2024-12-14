@@ -77,9 +77,9 @@ func (c *Client) Start(ctx context.Context, id string, logger *slog.Logger) erro
 		return err
 	}
 
-	logger.Info("client initialized", "id", id, "result", initializeResult)
+	logger.Info("child MCP server initialized", "id", id, "name", c.Server.Name)
 
-	if err := c.conn.Notify(ctx, "initialized", &mcp.InitializeNotification{}); err != nil {
+	if err := c.conn.Notify(ctx, "initialized", &mcp.InitializedNotification{}); err != nil {
 		logger.Error("failed to notify client initialization", "err", err)
 		cancel()
 		return err
@@ -91,8 +91,6 @@ func (c *Client) Start(ctx context.Context, id string, logger *slog.Logger) erro
 		cancel()
 		return err
 	}
-
-	logger.Info("client tools listed", "id", id, "tools", toolsListResult.Tools)
 
 	return nil
 }

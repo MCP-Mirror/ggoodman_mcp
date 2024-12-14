@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"mcp/internal/server"
+	localbroker "mcp/internal/local_broker"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,7 +27,7 @@ var (
 			})
 
 			g.Go(func() error {
-				_, err := server.NewServer(ctx, logger, os.Stdin, os.Stdout)
+				_, err := localbroker.NewServer(ctx, logger, os.Stdin, os.Stdout)
 				if err != nil {
 					return err
 				}

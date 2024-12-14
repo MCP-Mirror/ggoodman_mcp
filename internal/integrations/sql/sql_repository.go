@@ -3,21 +3,67 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"embed"
+	"fmt"
+	"log/slog"
 	"mcp/internal/integrations"
 	"mcp/internal/registry"
 	"sync"
+	"time"
+
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/sqlite"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+	_ "modernc.org/sqlite"
 )
+
+//go:embed migrations/*.sql
+var migrationsDir embed.FS
 
 var _ integrations.IntegrationsRepository = &databaseIntegrationsRepository{}
 
 type databaseIntegrationsRepository struct {
 	callbacks   map[struct{}]integrations.IntegrationsChangedCallback
 	callbacksMu sync.RWMutex
+
+	db *sql.DB
 }
 
-func NewSQLDatabaseIntegrationsRepository(db *sql.DB) (integrations.IntegrationsRepository, error) {
+func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logger, dsnURI string) (integrations.IntegrationsRepository, error) {
+	localDb, err := sql.Open("sqlite", dsnURI)
+	if err != nil {
+		return nil, fmt.Errorf("error connecting to database: %w", err)
+	}
+	defer localDb.Close()
+
+	dir, err := iofs.New(migrationsDir, "db")
+	if err != nil {
+		return nil, fmt.Errorf("error creating migrations source: %w", err)
+	}
+	defer dir.Close()
+
+	instance, err := sqlite.WithInstance(localDb, &sqlite.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("error creating migrations instance: %w", err)
+	}
+
+	migrations, err := migrate.NewWithInstance("iofs", dir, "sqlite:/"+dsnURI, instance)
+	if err != nil {
+		return nil, fmt.Errorf("error creating migrations: %w", err)
+	}
+	defer migrations.Close()
+
+	err = migrations.Up()
+	if err != nil && err != migrate.ErrNoChange {
+		return nil, fmt.Errorf("error running migrations: %w", err)
+	}
+	if err != migrate.ErrNoChange {
+		logger.Debug("migrations completed successfully", "uri", dsnURI)
+	}
+
 	return &databaseIntegrationsRepository{
 		callbacks: make(map[struct{}]integrations.IntegrationsChangedCallback),
+		db:        localDb,
 	}, nil
 }
 
@@ -25,8 +71,39 @@ func (r *databaseIntegrationsRepository) InstallIntegration(ctx context.Context,
 	return nil, nil
 }
 
+var queryInstalledIntegrations = `
+SELECT id, name, description, vendor, source_url, homepage, license, runtime
+FROM integrations
+`
+
 func (r *databaseIntegrationsRepository) ListIntegrations(ctx context.Context) ([]*integrations.InstalledIntegration, error) {
-	return nil, nil
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	stmt, err := r.db.PrepareContext(ctx, queryInstalledIntegrations)
+	if err != nil {
+		return nil, fmt.Errorf("error preparing list integrations query: %w", err)
+	}
+
+	rows, err := stmt.QueryContext(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error querying installed integrations: %w", err)
+	}
+	defer rows.Close()
+
+	var installed []*integrations.InstalledIntegration
+
+	for rows.Next() {
+		var i integrations.InstalledIntegration
+
+		if err := rows.Scan(&i.Id, &i.Manifest.Name, &i.Manifest.Description, &i.Manifest.Vendor, &i.Manifest.SourceURL, &i.Manifest.Homepage, &i.Manifest.License, &i.Manifest.Runtime); err != nil {
+			return nil, fmt.Errorf("error scanning installed integration: %w", err)
+		}
+
+		installed = append(installed, &i)
+	}
+
+	return installed, nil
 }
 
 func (r *databaseIntegrationsRepository) UninstallIntegration(ctx context.Context, i *integrations.InstalledIntegration) error {
