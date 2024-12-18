@@ -26,9 +26,7 @@ type localBroker struct {
 	integRepo   integrations.IntegrationsRepository
 	integRunner serverrunner.ServerStarter
 	logger      *slog.Logger
-
-	r io.ReadCloser
-	w io.WriteCloser
+	conn        *jsonrpc2.Conn
 }
 
 func NewLocalBroker(
@@ -43,22 +41,23 @@ func NewLocalBroker(
 		integRepo:   integRepo,
 		integRunner: runner,
 		logger:      logger,
-
-		r: r,
-		w: w,
 	}
+
+	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(lb.handleRequest).SuppressErrClosed())
+	stream := jsonrpc2.NewPlainObjectStream(util.NewReaderWriterCloser(r, w))
+
+	lb.conn = jsonrpc2.NewConn(ctx, stream, handler, jsonrpc2.LogMessages(jsonrpc.NewJSONRPCLogger(lb.logger)))
 
 	return lb
 }
 
 func (lb *localBroker) Close() error {
-	lb.logger.Debug("closing self (local broker)")
+	lb.conn.Close()
 	return nil
 }
 
 func (lb *localBroker) Run(ctx context.Context) error {
-	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(lb.handleRequest).SuppressErrClosed())
-	stream := jsonrpc2.NewPlainObjectStream(util.NewReaderWriterCloser(lb.r, lb.w))
+	defer lb.Close()
 
 	lb.integRepo.OnIntegrationsChanged(func(e *integrations.IntegrationsChangedEvent) {
 		switch e.Type {
@@ -81,15 +80,11 @@ func (lb *localBroker) Run(ctx context.Context) error {
 		go lb.startIntegration(ctx, *integration)
 	}
 
-	conn := jsonrpc2.NewConn(ctx, stream, handler, jsonrpc2.LogMessages(jsonrpc.NewJSONRPCLogger(lb.logger)))
-	defer conn.Close()
-
 	select {
 	case <-ctx.Done():
 		lb.logger.Debug("context cancelled")
 		return nil
-	case <-conn.DisconnectNotify():
-		lb.logger.Debug("connection closed")
+	case <-lb.conn.DisconnectNotify():
 		return fmt.Errorf("connection closed")
 	}
 }

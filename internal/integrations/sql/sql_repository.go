@@ -37,11 +37,7 @@ func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logg
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			localDb.Close()
-		}
-	}()
+	defer localDb.Close()
 
 	dir, err := iofs.New(migrationsDir, "migrations")
 	if err != nil {
