@@ -26,17 +26,24 @@ type databaseIntegrationsRepository struct {
 	callbacks   map[struct{}]integrations.IntegrationsChangedCallback
 	callbacksMu sync.RWMutex
 
-	db *sql.DB
+	logger *slog.Logger
+	db     *sql.DB
 }
 
 func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logger, dsnURI string) (integrations.IntegrationsRepository, error) {
+	var err error
+
 	localDb, err := sql.Open("sqlite", dsnURI)
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
-	defer localDb.Close()
+	defer func() {
+		if err != nil {
+			localDb.Close()
+		}
+	}()
 
-	dir, err := iofs.New(migrationsDir, "db")
+	dir, err := iofs.New(migrationsDir, "migrations")
 	if err != nil {
 		return nil, fmt.Errorf("error creating migrations source: %w", err)
 	}
@@ -54,17 +61,31 @@ func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logg
 	defer migrations.Close()
 
 	err = migrations.Up()
-	if err != nil && err != migrate.ErrNoChange {
-		return nil, fmt.Errorf("error running migrations: %w", err)
+	if err != nil {
+		if err != migrate.ErrNoChange {
+			return nil, fmt.Errorf("error running migrations: %w", err)
+		}
+		err = nil
 	}
 	if err != migrate.ErrNoChange {
 		logger.Debug("migrations completed successfully", "uri", dsnURI)
 	}
 
+	db, err := sql.Open("sqlite", dsnURI)
+	if err != nil {
+		return nil, fmt.Errorf("error connecting to database: %w", err)
+	}
+
 	return &databaseIntegrationsRepository{
 		callbacks: make(map[struct{}]integrations.IntegrationsChangedCallback),
-		db:        localDb,
+		db:        db,
+		logger:    logger,
 	}, nil
+}
+
+func (r *databaseIntegrationsRepository) Close() error {
+	r.logger.Debug("closing database")
+	return r.db.Close()
 }
 
 func (r *databaseIntegrationsRepository) InstallIntegration(ctx context.Context, m *registry.IntegrationManifest) (*integrations.InstalledIntegration, error) {
@@ -110,16 +131,28 @@ func (r *databaseIntegrationsRepository) UninstallIntegration(ctx context.Contex
 	return nil
 }
 
-func (r *databaseIntegrationsRepository) OnIntegrationsChanged(cb integrations.IntegrationsChangedCallback) integrations.RemoveCallbackFunction {
+func (r *databaseIntegrationsRepository) OnIntegrationsChanged(cb integrations.IntegrationsChangedCallback) integrations.HandlerRemover {
 	r.callbacksMu.Lock()
 	defer r.callbacksMu.Unlock()
 
 	key := struct{}{}
 	r.callbacks[key] = cb
 
-	return func() {
-		r.callbacksMu.Lock()
-		defer r.callbacksMu.Unlock()
-		delete(r.callbacks, key)
+	return &handlerRemover[integrations.IntegrationsChangedCallback]{
+		callbacks: r.callbacks,
+		mu:        &r.callbacksMu,
+		key:       key,
 	}
+}
+
+type handlerRemover[T any] struct {
+	mu        *sync.RWMutex
+	key       struct{}
+	callbacks map[struct{}]T
+}
+
+func (hr *handlerRemover[T]) Close() {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+	delete(hr.callbacks, hr.key)
 }

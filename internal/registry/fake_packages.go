@@ -2,14 +2,21 @@ package registry
 
 import "encoding/json"
 
+type envVar struct {
+	Key      string `json:"key"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+}
+
 type mcpGetPackage struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Vendor      string `json:"vendor"`
-	SourceURL   string `json:"sourceUrl"`
-	Homepage    string `json:"homepage"`
-	Licence     string `json:"licence"`
-	Runtime     string `json:"runtime"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Vendor      string   `json:"vendor"`
+	SourceURL   string   `json:"sourceUrl"`
+	Homepage    string   `json:"homepage"`
+	Licence     string   `json:"licence"`
+	Runtime     string   `json:"runtime"`
+	EnvVars     []envVar `json:"envVars"`
 }
 
 var rawData = []byte(`[

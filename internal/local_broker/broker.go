@@ -5,121 +5,130 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mcp/internal/client"
+	"mcp/internal/integrations"
+	"mcp/internal/jsonrpc"
 	"mcp/internal/mcp"
 	serverrunner "mcp/internal/server_runner"
+	"mcp/internal/util"
 	"strings"
-	"sync"
 
-	"github.com/google/uuid"
 	"github.com/sourcegraph/jsonrpc2"
 )
 
-var servers []client.MCPServerDefinition = []client.MCPServerDefinition{
-	{
-		Name:        "@modelcontextprotocol/server-filesystem",
-		Description: "MCP server for filesystem access",
-		Cmd:         "npx",
-		Args: []string{
-			"-y",
-			"@modelcontextprotocol/server-github",
-		},
-		Env: []string{
-			"GITHUB_PERSONAL_ACCESS_TOKEN=yoink",
-		},
-	},
+type LocalBroker interface {
+	Close() error
+	Run(ctx context.Context) error
 }
 
-func NewServer(ctx context.Context, logger *slog.Logger, runner serverrunner.ServerRunner, r io.ReadCloser, w io.WriteCloser) (io.Closer, error) {
-	server := &server{
-		logger:  logger,
-		clients: make(map[string]*client.Client),
-	}
+var _ LocalBroker = &localBroker{}
 
-	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(server.handleRequest).SuppressErrClosed())
+type localBroker struct {
+	integRepo   integrations.IntegrationsRepository
+	integRunner serverrunner.ServerStarter
+	logger      *slog.Logger
 
-	conn := jsonrpc2.NewConn(ctx, jsonrpc2.NewPlainObjectStream(&stdioCloser{
+	r io.ReadCloser
+	w io.WriteCloser
+}
+
+func NewLocalBroker(
+	ctx context.Context,
+	logger *slog.Logger,
+	integRepo integrations.IntegrationsRepository,
+	runner serverrunner.ServerStarter,
+	r io.ReadCloser,
+	w io.WriteCloser,
+) LocalBroker {
+	lb := &localBroker{
+		integRepo:   integRepo,
+		integRunner: runner,
+		logger:      logger,
+
 		r: r,
 		w: w,
-	}), handler, jsonrpc2.LogMessages(&slogLogger{logger: logger}))
-
-	server.conn = conn
-
-	for _, serverDef := range servers {
-		id, err := uuid.NewRandom()
-		if err != nil {
-			return nil, err
-		}
-
-		client := &client.Client{
-			Id:     id.String(),
-			Server: &serverDef,
-		}
-
-		go func() {
-			if err := client.Start(ctx, id.String(), logger); err != nil {
-				logger.Error("failed to start client", "err", err)
-
-				client.Close()
-				return
-			}
-
-			// Only add bootstrapped clients
-			server.clientsMu.Lock()
-			server.clients[id.String()] = client
-			server.clientsMu.Unlock()
-
-			logger.Info("child MCP server bootstrapped", "id", id.String(), "name", serverDef.Name)
-		}()
 	}
 
-	return server, nil
+	return lb
 }
 
-type server struct {
-	logger    *slog.Logger
-	conn      *jsonrpc2.Conn
-	clients   map[string]*client.Client
-	clientsMu sync.Mutex
+func (lb *localBroker) Close() error {
+	lb.logger.Debug("closing self (local broker)")
+	return nil
 }
 
-func (s *server) Close() error {
-	s.logger.Debug("closing server")
-	s.clientsMu.Lock()
-	defer s.clientsMu.Unlock()
-	for _, client := range s.clients {
-		client.Close()
+func (lb *localBroker) Run(ctx context.Context) error {
+	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(lb.handleRequest).SuppressErrClosed())
+	stream := jsonrpc2.NewPlainObjectStream(util.NewReaderWriterCloser(lb.r, lb.w))
+
+	lb.integRepo.OnIntegrationsChanged(func(e *integrations.IntegrationsChangedEvent) {
+		switch e.Type {
+		case integrations.IntegrationsChangedEventTypeAdded:
+			go lb.startIntegration(ctx, e.Integration)
+		case integrations.IntegrationsChangedEventTypeRemoved:
+			go lb.stopIntegration(ctx, e.Integration)
+		}
+	})
+
+	installed, err := lb.integRepo.ListIntegrations(ctx)
+	if err != nil {
+		return fmt.Errorf("error listing integrations: %w", err)
 	}
 
-	return s.conn.Close()
+	lb.logger.Debug("bootstrapping integrations", "count", len(installed))
+
+	for _, integration := range installed {
+		lb.logger.Info("bootstrapping integration", "id", integration.Id)
+		go lb.startIntegration(ctx, *integration)
+	}
+
+	conn := jsonrpc2.NewConn(ctx, stream, handler, jsonrpc2.LogMessages(jsonrpc.NewJSONRPCLogger(lb.logger)))
+	defer conn.Close()
+
+	select {
+	case <-ctx.Done():
+		lb.logger.Debug("context cancelled")
+		return nil
+	case <-conn.DisconnectNotify():
+		lb.logger.Debug("connection closed")
+		return fmt.Errorf("connection closed")
+	}
 }
 
-func (s *server) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
+func (lb *localBroker) startIntegration(_ context.Context, integration integrations.InstalledIntegration) {
+	lb.logger.Info("starting integration", "id", integration.Id)
+}
+
+func (lb *localBroker) stopIntegration(_ context.Context, integration integrations.InstalledIntegration) {
+	lb.logger.Info("stopping integration", "id", integration.Id)
+}
+
+func (lb *localBroker) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
+	lb.logger.Debug("handling request", "method", req.Method)
 	switch req.Method {
 	case "initialize":
 		req, err := mcp.MustParams[mcp.InitializeRequest](req)
 		if err != nil {
 			return nil, err
 		}
-		return s.handleInitializeRequest(ctx, conn, req)
+		return lb.handleInitializeRequest(ctx, conn, req)
 	case "initialized":
 		req, err := mcp.MustParams[mcp.InitializedNotification](req)
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.handleInitializedNotification(ctx, conn, req)
+		return nil, lb.handleInitializedNotification(ctx, conn, req)
 	case "tools/call":
 		req, err := mcp.MustParams[mcp.ToolsCallRequest](req)
 		if err != nil {
 			return nil, err
 		}
-		return s.handleToolsCallRequest(ctx, conn, req)
+		return lb.handleToolsCallRequest(ctx, conn, req)
 	case "tools/list":
 		req, err := mcp.MustParams[mcp.ToolsListRequest](req)
 		if err != nil {
 			return nil, err
 		}
-		return s.handleToolsListRequest(ctx, conn, req)
+		return lb.handleToolsListRequest(ctx, conn, req)
 	default:
 		return nil, &jsonrpc2.Error{
 			Code:    jsonrpc2.CodeMethodNotFound,
@@ -128,7 +137,7 @@ func (s *server) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, req *js
 	}
 }
 
-func (s *server) handleInitializeRequest(_ context.Context, _ *jsonrpc2.Conn, _ *mcp.InitializeRequest) (*mcp.InitializeResult, error) {
+func (lb *localBroker) handleInitializeRequest(_ context.Context, _ *jsonrpc2.Conn, _ *mcp.InitializeRequest) (*mcp.InitializeResult, error) {
 	// TODO: Negotiate protocol versions
 
 	instructions := strings.TrimSpace(`
@@ -184,11 +193,11 @@ installed child servers can fulfill the request.
 	}, nil
 }
 
-func (s *server) handleInitializedNotification(_ context.Context, _ *jsonrpc2.Conn, _ *mcp.InitializedNotification) error {
+func (lb *localBroker) handleInitializedNotification(_ context.Context, _ *jsonrpc2.Conn, _ *mcp.InitializedNotification) error {
 	return nil
 }
 
-func (s *server) handleToolsCallRequest(_ context.Context, _ *jsonrpc2.Conn, req *mcp.ToolsCallRequest) (*mcp.ToolsCallResult, error) {
+func (lb *localBroker) handleToolsCallRequest(_ context.Context, _ *jsonrpc2.Conn, req *mcp.ToolsCallRequest) (*mcp.ToolsCallResult, error) {
 	switch req.ToolName {
 	case "__mcp__install_server":
 		return nil, &jsonrpc2.Error{
@@ -213,7 +222,7 @@ func (s *server) handleToolsCallRequest(_ context.Context, _ *jsonrpc2.Conn, req
 	}
 }
 
-func (s *server) handleToolsListRequest(_ context.Context, _ *jsonrpc2.Conn, _ *mcp.ToolsListRequest) (*mcp.ToolsListResult, error) {
+func (lb *localBroker) handleToolsListRequest(_ context.Context, _ *jsonrpc2.Conn, _ *mcp.ToolsListRequest) (*mcp.ToolsListResult, error) {
 	builtInTools := []mcp.ToolDefinition{
 		{
 			Name: "__mcp__install_server",
@@ -287,42 +296,4 @@ If you
 	return &mcp.ToolsListResult{
 		Tools: builtInTools,
 	}, nil
-}
-
-type slogLogger struct {
-	logger *slog.Logger
-}
-
-func (s *slogLogger) Printf(format string, v ...interface{}) {
-	s.logger.Debug(fmt.Sprintf(format, v...), "role", "server")
-}
-
-var _ io.ReadWriteCloser = &stdioCloser{}
-
-type stdioCloser struct {
-	r io.ReadCloser
-	w io.WriteCloser
-}
-
-func (s *stdioCloser) Read(p []byte) (n int, err error) {
-	return s.r.Read(p)
-}
-
-func (s *stdioCloser) Write(p []byte) (n int, err error) {
-	return s.w.Write(p)
-}
-
-func (s *stdioCloser) Close() error {
-	rCloseErr := s.r.Close()
-	wCloseErr := s.w.Close()
-
-	if rCloseErr != nil {
-		return rCloseErr
-	}
-
-	if wCloseErr != nil {
-		return wCloseErr
-	}
-
-	return nil
 }

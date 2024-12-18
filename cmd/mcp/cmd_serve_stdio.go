@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	"mcp/internal/integrations/sql"
 	localbroker "mcp/internal/local_broker"
 	docker_runner "mcp/internal/server_runner/docker"
 	"os"
@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -19,34 +20,49 @@ var (
 		Use:   "stdio",
 		Short: "Start mcp as a stdio server.",
 		Run: func(cmd *cobra.Command, args []string) {
-			ctx := cmd.Context()
-
-			runner, err := docker_runner.NewDockerServerRunner(ctx)
-			cobra.CheckErr(err)
-
-			g, ctx := errgroup.WithContext(context.Background())
+			g, ctx := errgroup.WithContext(cmd.Context())
 
 			g.Go(func() error {
 				<-interrupts()
-				logger.Info("interrupted")
 				return context.Canceled
 			})
 
+			dsn := viper.GetString("db")
+			logger.Debug("using database", "dsn", dsn)
+			integRepo, err := sql.NewSQLDatabaseIntegrationsRepository(ctx, logger, dsn)
+			if err != nil {
+				logger.Error("error while creating integrations repository", "err", err)
+				os.Exit(1)
+			}
+			defer integRepo.Close()
+
+			logger.Debug("database up, starting docker runner")
+
+			runner, err := docker_runner.NewDockerServerRunner(ctx, logger, docker_runner.DockerServerOptions{})
+			if err != nil {
+				logger.Error("error while creating docker server runner", "err", err)
+				os.Exit(1)
+			}
+			defer runner.Close()
+
 			g.Go(func() error {
-				_, err := localbroker.NewServer(ctx, logger, runner, os.Stdin, os.Stdout)
-				if err != nil {
+				logger.Debug("docker runner up, starting local broker")
+
+				broker := localbroker.NewLocalBroker(ctx, logger, integRepo, runner, os.Stdin, os.Stdout)
+				defer broker.Close()
+
+				if err := broker.Run(ctx); err != nil && err != context.Canceled {
+					logger.Error("error while running local broker", "err", err)
 					return err
 				}
 
-				// Now that the server is set up, we want to load up configured clients and start them.
-				// This will be done in a separate goroutine so that the server can start handling requests.
+				logger.Debug("local broker finished")
 
-				logger.Info("server started")
 				return nil
 			})
 
-			if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("server error", "err", err)
+			if err := g.Wait(); err != nil && err != context.Canceled {
+				logger.Error("error while running server", "err", err)
 				os.Exit(1)
 			}
 		},

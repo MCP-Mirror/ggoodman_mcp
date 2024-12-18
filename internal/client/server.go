@@ -3,10 +3,11 @@ package client
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
+	"mcp/internal/jsonrpc"
 	"mcp/internal/mcp"
 	serverrunner "mcp/internal/server_runner"
+	"mcp/internal/util"
 	"os"
 	"os/exec"
 
@@ -18,14 +19,14 @@ type MCPServerDefinition struct {
 	Description string
 	Cmd         string
 	Args        []string
-	Env         []string
+	Env         map[string]string
 }
 
 type Client struct {
 	Id     string
 	Server *MCPServerDefinition
 
-	runner serverrunner.ServerRunner
+	runner serverrunner.ServerStarter
 
 	cmd    *exec.Cmd
 	conn   *jsonrpc2.Conn
@@ -46,7 +47,7 @@ func (c *Client) Start(ctx context.Context, id string, logger *slog.Logger) erro
 	args = append(args, c.Server.Args...)
 
 	c.cmd = exec.CommandContext(ctx, "docker", args...)
-	c.cmd.Env = append(os.Environ(), c.Server.Env...)
+	// c.cmd.Env = append(os.Environ(), c.Server.Env...)
 
 	w, err := c.cmd.StdinPipe()
 	if err != nil {
@@ -64,10 +65,7 @@ func (c *Client) Start(ctx context.Context, id string, logger *slog.Logger) erro
 
 	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(c.handleRequest).SuppressErrClosed())
 
-	c.conn = jsonrpc2.NewConn(ctx, jsonrpc2.NewPlainObjectStream(&stdioCloser{
-		r: r,
-		w: w,
-	}), handler, jsonrpc2.LogMessages(&slogLogger{logger: logger, id: id}))
+	c.conn = jsonrpc2.NewConn(ctx, jsonrpc2.NewPlainObjectStream(util.NewReaderWriterCloser(r, w)), handler, jsonrpc2.LogMessages(jsonrpc.NewJSONRPCLogger(logger)))
 
 	c.cmd.Stderr = os.Stderr
 
@@ -107,43 +105,4 @@ func (c *Client) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, req *js
 		Code:    jsonrpc2.CodeMethodNotFound,
 		Message: fmt.Sprintf("method %q not found", req.Method),
 	}
-}
-
-type slogLogger struct {
-	logger *slog.Logger
-	id     string
-}
-
-func (s *slogLogger) Printf(format string, v ...interface{}) {
-	s.logger.Debug(fmt.Sprintf(format, v...), "client", s.id)
-}
-
-var _ io.ReadWriteCloser = &stdioCloser{}
-
-type stdioCloser struct {
-	r io.ReadCloser
-	w io.WriteCloser
-}
-
-func (s *stdioCloser) Read(p []byte) (n int, err error) {
-	return s.r.Read(p)
-}
-
-func (s *stdioCloser) Write(p []byte) (n int, err error) {
-	return s.w.Write(p)
-}
-
-func (s *stdioCloser) Close() error {
-	rCloseErr := s.r.Close()
-	wCloseErr := s.w.Close()
-
-	if rCloseErr != nil {
-		return rCloseErr
-	}
-
-	if wCloseErr != nil {
-		return wCloseErr
-	}
-
-	return nil
 }
