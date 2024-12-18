@@ -1,7 +1,6 @@
 package util
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/hashicorp/go-multierror"
@@ -21,19 +20,12 @@ func NewReaderWriterCloser(r io.ReadCloser, w io.WriteCloser) io.ReadWriteCloser
 	}
 }
 
-func (s *readerWriterCloser) Read(p []byte) (n int, err error) {
-	fmt.Printf("-> Read(%d)\n", len(p))
-	n, err = s.r.Read(p)
-
-	fmt.Printf("<- Read %d: %v\n", n, err)
-	return
+func (s *readerWriterCloser) Read(p []byte) (int, error) {
+	return s.r.Read(p)
 }
 
-func (s *readerWriterCloser) Write(p []byte) (n int, err error) {
-	fmt.Printf("-> Write(%d)\n", len(p))
-	n, err = s.w.Write(p)
-	fmt.Printf("<- Write %d, %v\n", n, err)
-	return
+func (s *readerWriterCloser) Write(p []byte) (int, error) {
+	return s.w.Write(p)
 }
 
 func (s *readerWriterCloser) Close() error {

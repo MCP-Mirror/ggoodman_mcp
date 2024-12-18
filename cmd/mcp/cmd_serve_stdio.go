@@ -58,8 +58,11 @@ var (
 				broker := localbroker.NewLocalBroker(ctx, logger, integRepo, runner, os.Stdin, os.Stdout)
 				defer broker.Close()
 
-				if err := broker.Run(ctx); err != nil && err != context.Canceled {
-					logger.Error("error while running local broker", "err", err)
+				if err := broker.Run(ctx); err != nil {
+					if err != localbroker.ErrConnectionClosed {
+						logger.Error("error while running local broker", "err", err)
+					}
+
 					return err
 				}
 
@@ -68,7 +71,7 @@ var (
 				return nil
 			})
 
-			if err := g.Wait(); err != nil && err != context.Canceled {
+			if err := g.Wait(); err != nil && err != context.Canceled && err != localbroker.ErrConnectionClosed {
 				logger.Error("error while running server", "err", err)
 				os.Exit(1)
 			}

@@ -8,6 +8,7 @@ import (
 type InstalledIntegration struct {
 	Id       string
 	Manifest *registry.IntegrationManifest
+	Env      map[string]string
 }
 
 type IntegrationsChangedEventType int

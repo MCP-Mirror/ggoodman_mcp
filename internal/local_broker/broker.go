@@ -11,9 +11,16 @@ import (
 	serverrunner "mcp/internal/server_runner"
 	"mcp/internal/util"
 	"strings"
+	"time"
 
 	"github.com/sourcegraph/jsonrpc2"
 )
+
+const (
+	DEFAULT_START_TIMEOUT_SECONDS = 30
+)
+
+var ErrConnectionClosed = fmt.Errorf("connection closed")
 
 type LocalBroker interface {
 	Close() error
@@ -27,6 +34,8 @@ type localBroker struct {
 	integRunner serverrunner.ServerStarter
 	logger      *slog.Logger
 	conn        *jsonrpc2.Conn
+
+	integrationStartTimeout time.Duration
 }
 
 func NewLocalBroker(
@@ -41,6 +50,8 @@ func NewLocalBroker(
 		integRepo:   integRepo,
 		integRunner: runner,
 		logger:      logger,
+
+		integrationStartTimeout: time.Duration(DEFAULT_START_TIMEOUT_SECONDS) * time.Second,
 	}
 
 	handler := jsonrpc2.AsyncHandler(jsonrpc2.HandlerWithError(lb.handleRequest).SuppressErrClosed())
@@ -82,19 +93,44 @@ func (lb *localBroker) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		lb.logger.Debug("context cancelled")
-		return nil
 	case <-lb.conn.DisconnectNotify():
-		return fmt.Errorf("connection closed")
+		return ErrConnectionClosed
 	}
+
+	return nil
 }
 
-func (lb *localBroker) startIntegration(_ context.Context, integration integrations.InstalledIntegration) {
+func (lb *localBroker) startIntegration(ctx context.Context, integration integrations.InstalledIntegration) {
+	ctx, cancel := context.WithTimeout(ctx, lb.integrationStartTimeout)
+	defer cancel()
+
 	lb.logger.Info("starting integration", "id", integration.Id)
+
+	srv, err := lb.integRunner.Create(ctx, serverrunner.ServerDescription{
+		Runtime: integration.Manifest.Runtime,
+		Command: integration.Manifest.Command,
+		Args:    integration.Manifest.Args,
+		Env:     integration.Env,
+	})
+	if err != nil {
+		lb.logger.Error("error creating integration", "id", integration.Id, "err", err)
+		return
+	}
+
+	if err := srv.Run(ctx); err != nil {
+		lb.logger.Error("error running integration", "id", integration.Id, "err", err)
+	}
+
+	lb.removeIntegrationById(ctx, integration.Id)
+
 }
 
 func (lb *localBroker) stopIntegration(_ context.Context, integration integrations.InstalledIntegration) {
 	lb.logger.Info("stopping integration", "id", integration.Id)
+}
+
+func (lb *localBroker) removeIntegrationById(_ context.Context, integrationId string) {
+	lb.logger.Info("removing integration", "id", integrationId)
 }
 
 func (lb *localBroker) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {

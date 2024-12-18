@@ -16,6 +16,7 @@ import (
 	docker "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/sourcegraph/jsonrpc2"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -174,11 +175,25 @@ func (dsi *DockerServerInstance) Run(ctx context.Context) error {
 	conn := jsonrpc2.NewConn(ctx, stream, handler, jsonRPCLogger)
 	defer conn.Close()
 
-	if _, err := stdcopy.StdCopy(stdoutW, stderrW, attachResp.Reader); err != nil && err != io.EOF {
-		return fmt.Errorf("error copying stdio: %w", err)
-	}
+	g, ctx := errgroup.WithContext(ctx)
 
-	return nil
+	g.Go(func() error {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-conn.DisconnectNotify():
+			return fmt.Errorf("connection closed")
+		}
+	})
+
+	g.Go(func() error {
+		if _, err := stdcopy.StdCopy(stdoutW, stderrW, attachResp.Reader); err != nil && err != io.EOF {
+			return fmt.Errorf("error copying stdio: %w", err)
+		}
+		return nil
+	})
+
+	return g.Wait()
 }
 
 func (dsi *DockerServerInstance) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (interface{}, error) {

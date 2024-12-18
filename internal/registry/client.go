@@ -19,6 +19,8 @@ type IntegrationManifest struct {
 	License     string
 	Homepage    string
 	Runtime     string
+	Command     string
+	Args        []string
 }
 
 type RegistryClient interface {
