@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"mcp/internal/integrations"
+	"mcp/internal/integrations/sql/internal"
 	"mcp/internal/registry"
 	"sync"
 	"time"
@@ -33,7 +35,7 @@ type databaseIntegrationsRepository struct {
 func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logger, dsnURI string) (integrations.IntegrationsRepository, error) {
 	var err error
 
-	localDb, err := sql.Open("sqlite", dsnURI)
+	localDb, err := sql.Open("sqlite", "file://"+dsnURI+"?_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
@@ -50,7 +52,7 @@ func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logg
 		return nil, fmt.Errorf("error creating migrations instance: %w", err)
 	}
 
-	migrations, err := migrate.NewWithInstance("iofs", dir, "sqlite:/"+dsnURI, instance)
+	migrations, err := migrate.NewWithInstance("iofs", dir, "sqlite:/"+dsnURI+"?_pragma=journal_mode(WAL)", instance)
 	if err != nil {
 		return nil, fmt.Errorf("error creating migrations: %w", err)
 	}
@@ -67,7 +69,7 @@ func NewSQLDatabaseIntegrationsRepository(ctx context.Context, logger *slog.Logg
 		logger.Debug("migrations completed successfully", "uri", dsnURI)
 	}
 
-	db, err := sql.Open("sqlite", dsnURI)
+	db, err := sql.Open("sqlite", "file://"+dsnURI+"?_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
@@ -85,39 +87,58 @@ func (r *databaseIntegrationsRepository) Close() error {
 }
 
 func (r *databaseIntegrationsRepository) InstallIntegration(ctx context.Context, m *registry.IntegrationManifest) (*integrations.InstalledIntegration, error) {
-	return nil, nil
-}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 
-var queryInstalledIntegrations = `
-SELECT id, name, description, vendor, source_url, homepage, license, runtime
-FROM integrations
-`
+	dbtx := internal.New(r.db)
+
+	i, err := dbtx.CreateIntegration(ctx, internal.CreateIntegrationParams{
+		Name:         m.Name,
+		Description:  m.Description,
+		Vendor:       m.Vendor,
+		SourceUrl:    m.SourceURL,
+		Homepage:     m.Homepage,
+		License:      m.License,
+		Instructions: []byte{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error installing integration: %w", err)
+	}
+
+	return &integrations.InstalledIntegration{
+		Id:       base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", i.ID))),
+		Manifest: m,
+	}, nil
+}
 
 func (r *databaseIntegrationsRepository) ListIntegrations(ctx context.Context) ([]*integrations.InstalledIntegration, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	stmt, err := r.db.PrepareContext(ctx, queryInstalledIntegrations)
-	if err != nil {
-		return nil, fmt.Errorf("error preparing list integrations query: %w", err)
-	}
+	dbtx := internal.New(r.db)
 
-	rows, err := stmt.QueryContext(ctx, nil)
+	listed, err := dbtx.ListIntegrations(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error querying installed integrations: %w", err)
+		return nil, fmt.Errorf("error listing integrations: %w", err)
 	}
-	defer rows.Close()
 
 	var installed []*integrations.InstalledIntegration
-
-	for rows.Next() {
-		var i integrations.InstalledIntegration
-
-		if err := rows.Scan(&i.Id, &i.Manifest.Name, &i.Manifest.Description, &i.Manifest.Vendor, &i.Manifest.SourceURL, &i.Manifest.Homepage, &i.Manifest.License, &i.Manifest.Runtime); err != nil {
-			return nil, fmt.Errorf("error scanning installed integration: %w", err)
-		}
-
-		installed = append(installed, &i)
+	for _, i := range listed {
+		installed = append(installed, &integrations.InstalledIntegration{
+			Id: base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", i.ID))),
+			Manifest: &registry.IntegrationManifest{
+				Name:        i.Name,
+				Description: i.Description,
+				Vendor:      i.Vendor,
+				SourceURL:   i.SourceUrl,
+				Homepage:    i.Homepage,
+				License:     i.License,
+				// TODO: Remove hard-coded values
+				Runtime: "node",
+				Command: "npx",
+				Args:    []string{"-y", "@modelcontextprotocol/server-github"},
+			},
+		})
 	}
 
 	return installed, nil

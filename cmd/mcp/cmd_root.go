@@ -57,7 +57,7 @@ func initConfig() {
 	viper.SetConfigName("config.toml")
 
 	viper.SetDefault("logfile", path.Join(cfgDir, "debug.log"))
-	viper.SetDefault("db", path.Join(cfgDir, "mcp.db"))
+	viper.SetDefault("db", path.Join(cfgDir, "db.sqlite"))
 
 	viper.AutomaticEnv()
 

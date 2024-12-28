@@ -31,7 +31,7 @@ func ParseRuntime(spec string) (*Runtime, error) {
 	if len(specParts) == 1 {
 		return &Runtime{
 			Name:    specParts[0],
-			Version: "latest",
+			Version: "",
 		}, nil
 	}
 

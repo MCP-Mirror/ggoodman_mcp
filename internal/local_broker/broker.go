@@ -142,12 +142,8 @@ func (lb *localBroker) handleRequest(ctx context.Context, conn *jsonrpc2.Conn, r
 			return nil, err
 		}
 		return lb.handleInitializeRequest(ctx, conn, req)
-	case "initialized":
-		req, err := mcp.MustParams[mcp.InitializedNotification](req)
-		if err != nil {
-			return nil, err
-		}
-		return nil, lb.handleInitializedNotification(ctx, conn, req)
+	case "notifications/initialized":
+		return nil, lb.handleInitializedNotification(ctx, conn, nil)
 	case "tools/call":
 		req, err := mcp.MustParams[mcp.ToolsCallRequest](req)
 		if err != nil {

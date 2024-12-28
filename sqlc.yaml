@@ -1,0 +1,15 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "./internal/integrations/sql/queries"
+    schema: "./internal/integrations/sql/migrations"
+    gen:
+      go:
+        package: "internal"
+        out: "./internal/integrations/sql/internal"
+        emit_json_tags: true
+        overrides:
+          # - column: "main.integrations.instructions"
+          #   go_type:
+          #     import: "mcp/internal/integrations"
+          #     type: "Instructions"

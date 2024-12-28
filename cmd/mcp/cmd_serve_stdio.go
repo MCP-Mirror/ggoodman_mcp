@@ -36,15 +36,12 @@ var (
 
 			g.Go(func() error {
 				dsn := viper.GetString("db")
-				logger.Debug("using database", "dsn", dsn)
 				integRepo, err := sql.NewSQLDatabaseIntegrationsRepository(ctx, logger, dsn)
 				if err != nil {
 					logger.Error("error while creating integrations repository", "err", err)
 					os.Exit(1)
 				}
 				defer integRepo.Close()
-
-				logger.Debug("database up, starting docker runner")
 
 				runner, err := docker_runner.NewDockerServerRunner(ctx, logger, docker_runner.DockerServerOptions{})
 				if err != nil {

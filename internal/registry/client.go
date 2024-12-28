@@ -9,6 +9,12 @@ type IntegrationSearchResult struct {
 	Description string
 }
 
+type IntegrationEnvConfig struct {
+	Name        string
+	Description string
+	Default     *string
+}
+
 type IntegrationManifest struct {
 	Id          string
 	Name        string
@@ -21,6 +27,7 @@ type IntegrationManifest struct {
 	Runtime     string
 	Command     string
 	Args        []string
+	EnvVars     []IntegrationEnvConfig
 }
 
 type RegistryClient interface {

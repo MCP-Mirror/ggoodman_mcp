@@ -6,12 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"mcp/internal/jsonrpc"
+	"mcp/internal/mcp"
 	serverrunner "mcp/internal/server_runner"
 	"mcp/internal/util"
 	"slices"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	docker "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -78,9 +80,10 @@ func (r *DockerServerRunner) Create(ctx context.Context, manifest serverrunner.S
 		AttachStdout: true,
 		AttachStderr: true,
 		OpenStdin:    true,
+		User:         "node",
 
-		Cmd: slices.Clone(manifest.Args),
-		Env: envMapToSlice(manifest.Env),
+		Cmd: append([]string{manifest.Command}, slices.Clone(manifest.Args)...),
+		Env: envMapToSlice(map[string]string{"NPM_CONFIG_CACHE": "/tmp/.npm", "GITHUB_PERSONAL_ACCESS_TOKEN": "FAKE 123"}),
 	}
 
 	initTrue := true
@@ -92,29 +95,48 @@ func (r *DockerServerRunner) Create(ctx context.Context, manifest serverrunner.S
 	}
 
 	hostConfig := container.HostConfig{
-		AutoRemove: true,
+		AutoRemove: false,
 		Init:       &initTrue,
 		Resources: container.Resources{
-			Memory:           int64(memoryLimitMB),
+			Memory:           int64(memoryLimitMB * 1024 * 1024),
 			MemorySwap:       0,
 			MemorySwappiness: &memorySwappinessZero,
 		},
 		ReadonlyRootfs: true,
 		DNS:            []string{"8.8.8.8"},
+		Tmpfs:          map[string]string{"/tmp": "rw"},
 	}
 	networkingConfig := network.NetworkingConfig{}
 
 	switch runtime.Name {
 	case "node":
-		config.Image = "node:" + runtime.Version
+		config.Image = "node"
+		if runtime.Version != "" {
+			config.Image += ":" + runtime.Version
+		}
 
 	case "python":
 		config.Image = "python:" + runtime.Version
+		if runtime.Version != "" {
+			config.Image += ":" + runtime.Version
+		}
 	}
+
+	pull, err := r.docker.ImagePull(ctx, config.Image, image.PullOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error pulling image: %w", err)
+	}
+
+	pullBuf, err := io.ReadAll(pull)
+	if err != nil {
+		return nil, fmt.Errorf("error reading image pull response: %w", err)
+	}
+
+	r.logger.Info("pulled image", "image", config.Image, "output", string(pullBuf))
 
 	dsi := &DockerServerInstance{
 		docker:           r.docker,
-		logger:           r.logger,
+		logger:           r.logger.With("cmd", manifest.Command, "args", manifest.Args),
 		containerConfig:  config,
 		hostConfig:       hostConfig,
 		networkingConfig: networkingConfig,
@@ -139,17 +161,23 @@ func (dsi *DockerServerInstance) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("error creating container: %w", err)
 	}
-	defer dsi.docker.ContainerRemove(ctx, cr.ID, container.RemoveOptions{
-		Force: true,
-	})
+	// defer dsi.docker.ContainerRemove(ctx, cr.ID, container.RemoveOptions{
+	// 	Force: true,
+	// })
+
+	waitCh, errCh := dsi.docker.ContainerWait(ctx, cr.ID, container.WaitConditionNotRunning)
 
 	if err := dsi.docker.ContainerStart(ctx, cr.ID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("error starting container: %w", err)
 	}
 
-	defer dsi.docker.ContainerStop(ctx, cr.ID, container.StopOptions{
-		Timeout: &SERVER_STOP_TIMEOUT_SECONDS,
-	})
+	dsi.logger.Info("started container", "id", cr.ID)
+
+	// defer dsi.docker.ContainerStop(ctx, cr.ID, container.StopOptions{
+	// 	Timeout: &SERVER_STOP_TIMEOUT_SECONDS,
+	// })
+
+	g, ctx := errgroup.WithContext(ctx)
 
 	stdoutR, stdoutW := io.Pipe()
 	_, stderrW := io.Pipe()
@@ -175,12 +203,16 @@ func (dsi *DockerServerInstance) Run(ctx context.Context) error {
 	conn := jsonrpc2.NewConn(ctx, stream, handler, jsonRPCLogger)
 	defer conn.Close()
 
-	g, ctx := errgroup.WithContext(ctx)
-
 	g.Go(func() error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case waitRes := <-waitCh:
+			dsi.logger.Debug("container exited", "status", waitRes.StatusCode)
+			return fmt.Errorf("container exited with code: %d", waitRes.StatusCode)
+		case err := <-errCh:
+			dsi.logger.Debug("error waiting for container", "err", err)
+			return fmt.Errorf("error waiting for container: %w", err)
 		case <-conn.DisconnectNotify():
 			return fmt.Errorf("connection closed")
 		}
@@ -190,6 +222,27 @@ func (dsi *DockerServerInstance) Run(ctx context.Context) error {
 		if _, err := stdcopy.StdCopy(stdoutW, stderrW, attachResp.Reader); err != nil && err != io.EOF {
 			return fmt.Errorf("error copying stdio: %w", err)
 		}
+		return nil
+	})
+
+	g.Go(func() error {
+		var initResult mcp.InitializeResult
+		if err := conn.Call(ctx, "initialize", &mcp.InitializeRequest{
+			ProtocolVersion: mcp.MCP_PROTOCOL_VERSION,
+			Capabilities: mcp.ClientCapabilities{
+				Roots: &mcp.ListChangesCapability{
+					ListChanged: func() *bool { b := true; return &b }(),
+				},
+				Sampling: &mcp.SamplingCapability{},
+			},
+		}, &initResult); err != nil {
+			return fmt.Errorf("error initializing server: %w", err)
+		}
+
+		if err := conn.Notify(ctx, "notifications/initialized", &mcp.InitializedNotification{}); err != nil {
+			return fmt.Errorf("error sending initialized notification: %w", err)
+		}
+
 		return nil
 	})
 
